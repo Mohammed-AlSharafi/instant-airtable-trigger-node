@@ -441,8 +441,8 @@ export class AirtableTrigger implements INodeType {
 					webhookData.baseId = baseId;
 					webhookData.tableId = tableId;
 					webhookData.macSecretBase64 = response.macSecretBase64;
-					// Initialize to 0 - this means we haven't processed any payloads yet
-					webhookData.lastCursor = 0;
+					// Initialize to 1 - this means we haven't processed any payloads yet
+					webhookData.lastCursor = 1;
 					webhookData.fieldsToInclude = this.getNodeParameter('fieldsToInclude', []) as string[];
 					webhookData.additionalFields = additionalFields;
 					webhookData.eventTypes = eventTypes;
@@ -520,8 +520,8 @@ export class AirtableTrigger implements INodeType {
 
 			console.log('Processing webhook notification:', { baseId, webhookId, timestamp });
 
-			// Get the last processed cursor, defaulting to 0 if not set (0 means we haven't processed any)
-			let lastProcessedCursor = webhookData.lastCursor as number || 0;
+			// Get the last processed cursor, defaulting to 1 if not set (1 means we haven't processed any)
+			let lastProcessedCursor = webhookData.lastCursor as number || 1;
 			console.log('Last processed cursor:', lastProcessedCursor);
 
 			// Fetch all payloads starting from the last processed cursor
