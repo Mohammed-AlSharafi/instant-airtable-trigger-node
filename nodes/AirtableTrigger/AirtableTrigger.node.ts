@@ -454,6 +454,36 @@ export class AirtableTrigger implements INodeType {
 						eventTypes: webhookData.eventTypes
 					});
 
+					// Add this to your create() method after webhook creation
+					console.log('Webhook created successfully:', {
+						webhookId: webhookData.webhookId,
+						baseId: webhookData.baseId,
+						macSecret: webhookData.macSecretBase64,
+						additionalFields: webhookData.additionalFields,
+						eventTypes: webhookData.eventTypes
+					});
+
+					// Initialize cursor by getting the current cursor from the webhook
+					try {
+						const webhookEndpoint = `/bases/${baseId}/webhooks`;
+						const webhooksResponse = await airtableApiRequest.call(this, 'GET', webhookEndpoint);
+
+						if (webhooksResponse && webhooksResponse.webhooks) {
+							for (const webhook of webhooksResponse.webhooks) {
+								if (webhook.id === response.id) {
+									// Start from the current cursor to avoid processing historical data
+									webhookData.lastCursor = webhook.cursorForNextPayload || 1;
+									console.log('Initialized lastCursor to:', webhookData.lastCursor);
+									break;
+								}
+							}
+						}
+					} catch (error) {
+						console.error('Error initializing cursor:', error);
+						// Fallback to 1 if we can't get the current cursor
+						webhookData.lastCursor = 1;
+					}
+
 					return true;
 				} catch (error) {
 					console.error('Error creating webhook:', error);
@@ -518,7 +548,11 @@ export class AirtableTrigger implements INodeType {
 
 			console.log('Processing webhook notification:', { baseId, webhookId, timestamp });
 
-			// First, get the webhook details to obtain the cursor for the next payload
+			// Get the last processed cursor, defaulting to 1 if not set
+			let lastProcessedCursor = webhookData.lastCursor as number || 1;
+			console.log('Last processed cursor:', lastProcessedCursor);
+
+			// Get the webhook details to obtain the cursor for the next payload
 			const webhookEndpoint = `/bases/${baseId}/webhooks`;
 			const webhooksResponse = await airtableApiRequest.call(this, 'GET', webhookEndpoint);
 
@@ -537,14 +571,17 @@ export class AirtableTrigger implements INodeType {
 				}
 			}
 
-			// Store this cursor for future use
-			webhookData.lastCursor = cursorForNextPayload;
+			// If there are no new payloads to process, return empty
+			if (lastProcessedCursor >= cursorForNextPayload) {
+				console.log('No new payloads to process (lastProcessed >= nextCursor)');
+				return {};
+			}
 
-			// Fetch the actual webhook payload data
+			// Fetch all payloads from the last processed cursor up to the current cursor
 			const payloadEndpoint = `/bases/${baseId}/webhooks/${webhookId}/payloads`;
-			const queryParams = { cursor: cursorForNextPayload - 1 }; // Use previous cursor to get the current payload
+			const queryParams = { cursor: lastProcessedCursor };
 
-			console.log('Fetching payload with cursor:', queryParams.cursor);
+			console.log('Fetching payloads starting from cursor:', lastProcessedCursor);
 
 			const payloadsResponse = await airtableApiRequest.call(this, 'GET', payloadEndpoint, {}, queryParams);
 
@@ -552,6 +589,21 @@ export class AirtableTrigger implements INodeType {
 
 			if (!payloadsResponse.payloads || payloadsResponse.payloads.length === 0) {
 				console.log('No payloads found');
+				// Update the cursor even if no payloads to prevent re-processing
+				webhookData.lastCursor = cursorForNextPayload;
+				return {};
+			}
+
+			// Filter payloads to only process ones we haven't seen before
+			const newPayloads = payloadsResponse.payloads.filter((payload: any) => {
+				return payload.cursor > lastProcessedCursor;
+			});
+
+			console.log(`Found ${newPayloads.length} new payloads out of ${payloadsResponse.payloads.length} total`);
+
+			if (newPayloads.length === 0) {
+				console.log('No new payloads to process after filtering');
+				webhookData.lastCursor = cursorForNextPayload;
 				return {};
 			}
 
@@ -561,8 +613,8 @@ export class AirtableTrigger implements INodeType {
 
 			console.log('Fields to include in output:', fieldsToInclude);
 
-			for (const payload of payloadsResponse.payloads) {
-				console.log('Processing payload:', payload);
+			for (const payload of newPayloads) {
+				console.log('Processing payload with cursor:', payload.cursor);
 
 				if (!payload.changedTablesById) {
 					console.log('No table changes in payload');
@@ -587,6 +639,7 @@ export class AirtableTrigger implements INodeType {
 								formattedPayloads.push({
 									...fieldInfo,
 									tableId,
+									cursor: payload.cursor, // Include cursor for debugging
 									changedBy: payload.actionMetadata?.sourceMetadata?.user ? {
 										userId: payload.actionMetadata.sourceMetadata.user.id,
 										userName: payload.actionMetadata.sourceMetadata.user.name,
@@ -606,6 +659,7 @@ export class AirtableTrigger implements INodeType {
 								formattedPayloads.push({
 									...fieldSchemaInfo,
 									tableId,
+									cursor: payload.cursor, // Include cursor for debugging
 									changedBy: payload.actionMetadata?.sourceMetadata?.user ? {
 										userId: payload.actionMetadata.sourceMetadata.user.id,
 										userName: payload.actionMetadata.sourceMetadata.user.name,
@@ -625,6 +679,7 @@ export class AirtableTrigger implements INodeType {
 								formattedPayloads.push({
 									...tableMetadataInfo,
 									tableId,
+									cursor: payload.cursor, // Include cursor for debugging
 									changedBy: payload.actionMetadata?.sourceMetadata?.user ? {
 										userId: payload.actionMetadata.sourceMetadata.user.id,
 										userName: payload.actionMetadata.sourceMetadata.user.name,
@@ -638,6 +693,11 @@ export class AirtableTrigger implements INodeType {
 				}
 			}
 
+			// Update the cursor to the highest cursor we've processed
+			const highestCursor = Math.max(...newPayloads.map((p: any) => p.cursor || 0));
+			webhookData.lastCursor = Math.max(highestCursor + 1, cursorForNextPayload);
+
+			console.log('Updated lastCursor to:', webhookData.lastCursor);
 			console.log('Formatted payloads:', formattedPayloads);
 
 			return {
