@@ -432,7 +432,7 @@ export class AirtableTrigger implements INodeType {
 						console.log('Setting watchSchemasOfFieldIds:', additionalFields.watchSchemasOfFieldIds);
 					}
 
-					console.log('Creating webhook with body:', body);
+					console.log('Creating webhook with body:', JSON.stringify(body, null, 2));
 
 					const response = await airtableApiRequest.call(this, 'POST', endpoint, body);
 					console.log('Webhook creation response:', response);
@@ -441,15 +441,22 @@ export class AirtableTrigger implements INodeType {
 					webhookData.baseId = baseId;
 					webhookData.tableId = tableId;
 					webhookData.macSecretBase64 = response.macSecretBase64;
-					webhookData.lastCursor = 1; // Start with cursor 1
-					webhookData.fieldsToInclude = this.getNodeParameter('fieldsToInclude', []) as string[];
+
+					// CRITICAL: Use the cursor from Airtable's response, not hardcoded 1
+					// This ensures we start from the correct position in the event stream
+					webhookData.lastCursor = response.cursorForNextPayload || 1;
+
+					webhookData.fieldsToInclude = fieldsToInclude;
 					webhookData.additionalFields = additionalFields;
 					webhookData.eventTypes = eventTypes;
 
 					console.log('Webhook created successfully:', {
 						webhookId: webhookData.webhookId,
 						baseId: webhookData.baseId,
-						macSecret: webhookData.macSecretBase64,
+						tableId: webhookData.tableId,
+						initialCursor: webhookData.lastCursor, // This is key for debugging cursor issues
+						macSecret: '***HIDDEN***', // Don't log sensitive data
+						fieldsToInclude: fieldsToInclude,
 						additionalFields: webhookData.additionalFields,
 						eventTypes: webhookData.eventTypes
 					});
@@ -457,6 +464,10 @@ export class AirtableTrigger implements INodeType {
 					return true;
 				} catch (error) {
 					console.error('Error creating webhook:', error);
+					// Log more details about the error for debugging
+					if (error.response) {
+						console.error('Error response:', error.response.data);
+					}
 					throw error;
 				}
 			},
@@ -518,7 +529,7 @@ export class AirtableTrigger implements INodeType {
 
 			console.log('Processing webhook notification:', { baseId, webhookId, timestamp });
 
-			// First, get the webhook details to obtain the cursor for the next payload
+			// Get the webhook details to obtain the cursor for the next payload
 			const webhookEndpoint = `/bases/${baseId}/webhooks`;
 			const webhooksResponse = await airtableApiRequest.call(this, 'GET', webhookEndpoint);
 
@@ -537,21 +548,77 @@ export class AirtableTrigger implements INodeType {
 				}
 			}
 
-			// Store this cursor for future use
-			webhookData.lastCursor = cursorForNextPayload;
+			// Get the last processed cursor (default to cursorForNextPayload - 1 for first run)
+			const lastProcessedCursor = (webhookData.lastCursor as number) || (cursorForNextPayload > 1 ? cursorForNextPayload - 1 : 1);
+			console.log('Last processed cursor:', lastProcessedCursor);
+			console.log('Current cursor for next payload:', cursorForNextPayload);
 
-			// Fetch the actual webhook payload data
+			// Check if there are new payloads to process
+			// We need to check if lastProcessedCursor is less than cursorForNextPayload
+			if (lastProcessedCursor >= cursorForNextPayload) {
+				console.log('No new payloads to process');
+				return {};
+			}
+
+			// Fetch all payloads from lastProcessedCursor to cursorForNextPayload - 1
 			const payloadEndpoint = `/bases/${baseId}/webhooks/${webhookId}/payloads`;
-			const queryParams = { cursor: cursorForNextPayload - 1 }; // Use previous cursor to get the current payload
+			let allPayloads: any[] = [];
+			let currentCursor = lastProcessedCursor;
+			let maxIterations = 10; // Prevent infinite loops
+			let iterations = 0;
 
-			console.log('Fetching payload with cursor:', queryParams.cursor);
+			// Fetch payloads in batches if needed
+			while (currentCursor < cursorForNextPayload && iterations < maxIterations) {
+				iterations++;
+				console.log(`Fetching payloads starting from cursor: ${currentCursor} (iteration ${iterations})`);
 
-			const payloadsResponse = await airtableApiRequest.call(this, 'GET', payloadEndpoint, {}, queryParams);
+				const queryParams = { cursor: currentCursor };
+				const payloadsResponse = await airtableApiRequest.call(this, 'GET', payloadEndpoint, {}, queryParams);
 
-			console.log('Payloads response:', payloadsResponse);
+				console.log(`Payloads response for cursor ${currentCursor}:`, {
+					payloadCount: payloadsResponse.payloads?.length || 0,
+					cursor: payloadsResponse.cursor,
+					mightHaveMore: payloadsResponse.mightHaveMore
+				});
 
-			if (!payloadsResponse.payloads || payloadsResponse.payloads.length === 0) {
-				console.log('No payloads found');
+				if (!payloadsResponse.payloads || payloadsResponse.payloads.length === 0) {
+					console.log('No more payloads found, breaking loop');
+					break;
+				}
+
+				// Add all payloads from this batch
+				allPayloads = allPayloads.concat(payloadsResponse.payloads);
+				console.log(`Added ${payloadsResponse.payloads.length} payloads. Total so far: ${allPayloads.length}`);
+
+				// Update cursor for next batch - use the cursor from response
+				if (payloadsResponse.cursor && payloadsResponse.cursor > currentCursor) {
+					currentCursor = payloadsResponse.cursor;
+				} else {
+					// Fallback: increment by the number of payloads processed
+					currentCursor += payloadsResponse.payloads.length;
+					console.log(`Warning: Using fallback cursor increment. New cursor: ${currentCursor}`);
+				}
+
+				// If we've reached the end or there are no more payloads
+				if (!payloadsResponse.mightHaveMore || currentCursor >= cursorForNextPayload) {
+					console.log('Reached end of payloads or target cursor');
+					break;
+				}
+			}
+
+			if (iterations >= maxIterations) {
+				console.warn('Maximum iterations reached in payload fetching loop');
+			}
+
+			console.log(`Total payloads fetched: ${allPayloads.length}`);
+
+			// Update the last processed cursor to the current cursorForNextPayload
+			// This ensures we don't reprocess the same data next time
+			webhookData.lastCursor = cursorForNextPayload;
+			console.log(`Updated lastCursor to: ${webhookData.lastCursor}`);
+
+			if (allPayloads.length === 0) {
+				console.log('No payloads to process');
 				return {};
 			}
 
@@ -561,8 +628,8 @@ export class AirtableTrigger implements INodeType {
 
 			console.log('Fields to include in output:', fieldsToInclude);
 
-			for (const payload of payloadsResponse.payloads) {
-				console.log('Processing payload:', payload);
+			for (const payload of allPayloads) {
+				console.log(`Processing payload with timestamp: ${payload.timestamp}, transaction: ${payload.baseTransactionNumber}`);
 
 				if (!payload.changedTablesById) {
 					console.log('No table changes in payload');
@@ -593,6 +660,7 @@ export class AirtableTrigger implements INodeType {
 										userEmail: payload.actionMetadata.sourceMetadata.user.email,
 									} : undefined,
 									timestamp: payload.timestamp,
+									baseTransactionNumber: payload.baseTransactionNumber,
 								});
 							}
 						}
@@ -612,6 +680,7 @@ export class AirtableTrigger implements INodeType {
 										userEmail: payload.actionMetadata.sourceMetadata.user.email,
 									} : undefined,
 									timestamp: payload.timestamp,
+									baseTransactionNumber: payload.baseTransactionNumber,
 								});
 							}
 						}
@@ -631,6 +700,7 @@ export class AirtableTrigger implements INodeType {
 										userEmail: payload.actionMetadata.sourceMetadata.user.email,
 									} : undefined,
 									timestamp: payload.timestamp,
+									baseTransactionNumber: payload.baseTransactionNumber,
 								});
 							}
 						}
@@ -638,7 +708,7 @@ export class AirtableTrigger implements INodeType {
 				}
 			}
 
-			console.log('Formatted payloads:', formattedPayloads);
+			console.log(`Final result: ${formattedPayloads.length} formatted payload items`);
 
 			return {
 				workflowData: [
@@ -647,11 +717,16 @@ export class AirtableTrigger implements INodeType {
 			};
 		} catch (error) {
 			console.error('Error processing webhook:', error);
-			// If there's an error, still return the original request body
-			// so we have some data to work with for debugging
+			// Log the error details but don't update cursor on failure
+			// This ensures we'll retry processing these payloads next time
 			return {
 				workflowData: [
-					this.helpers.returnJsonArray([req.body]),
+					this.helpers.returnJsonArray([{
+						error: 'Failed to process webhook',
+						originalRequest: req.body,
+						errorMessage: error.message,
+						timestamp: new Date().toISOString()
+					}]),
 				],
 			};
 		}
