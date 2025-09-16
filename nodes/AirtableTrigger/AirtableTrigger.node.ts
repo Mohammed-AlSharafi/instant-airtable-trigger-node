@@ -441,8 +441,8 @@ export class AirtableTrigger implements INodeType {
 					webhookData.baseId = baseId;
 					webhookData.tableId = tableId;
 					webhookData.macSecretBase64 = response.macSecretBase64;
-					// Initialize to 1 - this means we haven't processed any payloads yet
-					webhookData.lastCursor = 1;
+					// Don't initialize lastProcessedCursor - let it be undefined on first run
+					// This ensures we fetch all available payloads initially
 					webhookData.fieldsToInclude = this.getNodeParameter('fieldsToInclude', []) as string[];
 					webhookData.additionalFields = additionalFields;
 					webhookData.eventTypes = eventTypes;
@@ -520,43 +520,34 @@ export class AirtableTrigger implements INodeType {
 
 			console.log('Processing webhook notification:', { baseId, webhookId, timestamp });
 
-			// Get the last processed cursor, defaulting to 1 if not set (1 means we haven't processed any)
-			let lastProcessedCursor = webhookData.lastCursor as number || 1;
+			// Get the last processed cursor - this represents the last payload cursor we've seen
+			let lastProcessedCursor = webhookData.lastProcessedCursor as number;
 			console.log('Last processed cursor:', lastProcessedCursor);
 
-			// Fetch all payloads starting from the last processed cursor
+			// Fetch payloads from Airtable
 			const payloadEndpoint = `/bases/${baseId}/webhooks/${webhookId}/payloads`;
 			const queryParams: any = {};
 
-			// Only add cursor param if we have processed payloads before
-			if (lastProcessedCursor > 0) {
-				queryParams.cursor = lastProcessedCursor;
+			// If we have a lastProcessedCursor, only fetch payloads after that cursor
+			if (lastProcessedCursor !== undefined) {
+				queryParams.cursor = lastProcessedCursor + 1;
+				console.log('Fetching payloads starting from cursor:', lastProcessedCursor + 1);
+			} else {
+				console.log('First run - fetching all available payloads');
 			}
-
-			console.log('Fetching payloads with params:', queryParams);
 
 			const payloadsResponse = await airtableApiRequest.call(this, 'GET', payloadEndpoint, {}, queryParams);
 
 			console.log('Payloads response:', payloadsResponse);
 
 			if (!payloadsResponse.payloads || payloadsResponse.payloads.length === 0) {
-				console.log('No payloads found');
+				console.log('No new payloads found');
 				return {};
 			}
 
-			// Filter payloads to only process ones we haven't seen before
-			const newPayloads = payloadsResponse.payloads.filter((payload: any) => {
-				const hasValidCursor = payload.cursor && payload.cursor > lastProcessedCursor;
-				console.log(`Payload cursor: ${payload.cursor}, lastProcessed: ${lastProcessedCursor}, include: ${hasValidCursor}`);
-				return hasValidCursor;
-			});
-
-			console.log(`Found ${newPayloads.length} new payloads out of ${payloadsResponse.payloads.length} total`);
-
-			if (newPayloads.length === 0) {
-				console.log('No new payloads to process after filtering');
-				return {};
-			}
+			// Process all payloads returned (they should all be new)
+			const newPayloads = payloadsResponse.payloads;
+			console.log(`Processing ${newPayloads.length} new payloads`);
 
 			// Extract data from the payloads
 			const formattedPayloads = [];
@@ -645,10 +636,13 @@ export class AirtableTrigger implements INodeType {
 			}
 
 			// Update the cursor to the highest cursor we've processed
-			const highestCursor = Math.max(...newPayloads.map((p: any) => p.cursor || 0));
-			webhookData.lastCursor = highestCursor;
+			// This ensures we don't reprocess these payloads
+			if (newPayloads.length > 0) {
+				const highestCursor = Math.max(...newPayloads.map((p: any) => p.cursor || 0));
+				webhookData.lastProcessedCursor = highestCursor;
+				console.log('Updated lastProcessedCursor to:', webhookData.lastProcessedCursor);
+			}
 
-			console.log('Updated lastCursor to:', webhookData.lastCursor);
 			console.log('Formatted payloads:', formattedPayloads);
 
 			return {
