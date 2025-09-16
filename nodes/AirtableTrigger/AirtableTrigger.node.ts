@@ -537,114 +537,119 @@ export class AirtableTrigger implements INodeType {
 				}
 			}
 
-			// Store this cursor for future use
-			webhookData.lastCursor = cursorForNextPayload;
-
-			// Fetch the actual webhook payload data
-			const payloadEndpoint = `/bases/${baseId}/webhooks/${webhookId}/payloads`;
-			const queryParams = { cursor: cursorForNextPayload - 1 }; // Use previous cursor to get the current payload
-
-			console.log('Fetching payload with cursor:', queryParams.cursor);
-
-			const payloadsResponse = await airtableApiRequest.call(this, 'GET', payloadEndpoint, {}, queryParams);
-
-			console.log('Payloads response:', payloadsResponse);
-
-			if (!payloadsResponse.payloads || payloadsResponse.payloads.length === 0) {
-				console.log('No payloads found');
-				return {};
-			}
-
-			// Extract data from the payloads
+			// Extracted data from the payloads
 			const formattedPayloads = [];
 			const fieldsToInclude = (webhookData.fieldsToInclude as string[]) || [];
 
-			console.log('Fields to include in output:', fieldsToInclude);
+			// Store this cursor for future use
+			const old_cursor = webhookData.lastCursor || 1;
+			webhookData.lastCursor = cursorForNextPayload;
 
-			for (const payload of payloadsResponse.payloads) {
-				console.log('Processing payload:', payload);
+			for (let i = Number(old_cursor); i < cursorForNextPayload; i++) {
+				// Fetch the actual webhook payload data
+				const payloadEndpoint = `/bases/${baseId}/webhooks/${webhookId}/payloads`;
+				const queryParams = { cursor: i }; // Use previous cursor to get the current payload
 
-				if (!payload.changedTablesById) {
-					console.log('No table changes in payload');
-					continue;
+				console.log('Fetching payload with cursor:', queryParams.cursor);
+
+				const payloadsResponse = await airtableApiRequest.call(this, 'GET', payloadEndpoint, {}, queryParams);
+
+				console.log('Payloads response:', payloadsResponse);
+
+				if (!payloadsResponse.payloads || payloadsResponse.payloads.length === 0) {
+					console.log('No payloads found');
+					return {};
 				}
 
-				for (const tableId in payload.changedTablesById) {
-					console.log(`Processing changes for table: ${tableId}`);
-					if (!webhookData.tableId || tableId === webhookData.tableId) {
-						const tableData = payload.changedTablesById[tableId];
 
-						// Process record changes (cell values)
-						if (tableData.changedRecordsById) {
-							const changedRecords = tableData.changedRecordsById;
-							console.log(`Found ${Object.keys(changedRecords).length} changed records in table ${tableId}`);
+				console.log('Fields to include in output:', fieldsToInclude);
 
-							// Extract field changes
-							const fieldInfos = extractFieldInfo(changedRecords, fieldsToInclude);
-							console.log(`Extracted ${fieldInfos.length} field info entries with included data`);
 
-							for (const fieldInfo of fieldInfos) {
-								formattedPayloads.push({
-									...fieldInfo,
-									tableId,
-									changedBy: payload.actionMetadata?.sourceMetadata?.user ? {
-										userId: payload.actionMetadata.sourceMetadata.user.id,
-										userName: payload.actionMetadata.sourceMetadata.user.name,
-										userEmail: payload.actionMetadata.sourceMetadata.user.email,
-									} : undefined,
-									timestamp: payload.timestamp,
-								});
+				for (const payload of payloadsResponse.payloads) {
+					console.log('Processing payload:', payload);
+
+					if (!payload.changedTablesById) {
+						console.log('No table changes in payload');
+						continue;
+					}
+
+					for (const tableId in payload.changedTablesById) {
+						console.log(`Processing changes for table: ${tableId}`);
+						if (!webhookData.tableId || tableId === webhookData.tableId) {
+							const tableData = payload.changedTablesById[tableId];
+
+							// Process record changes (cell values)
+							if (tableData.changedRecordsById) {
+								const changedRecords = tableData.changedRecordsById;
+								console.log(`Found ${Object.keys(changedRecords).length} changed records in table ${tableId}`);
+
+								// Extract field changes
+								const fieldInfos = extractFieldInfo(changedRecords, fieldsToInclude);
+								console.log(`Extracted ${fieldInfos.length} field info entries with included data`);
+
+								for (const fieldInfo of fieldInfos) {
+									formattedPayloads.push({
+										...fieldInfo,
+										tableId,
+										changedBy: payload.actionMetadata?.sourceMetadata?.user ? {
+											userId: payload.actionMetadata.sourceMetadata.user.id,
+											userName: payload.actionMetadata.sourceMetadata.user.name,
+											userEmail: payload.actionMetadata.sourceMetadata.user.email,
+										} : undefined,
+										timestamp: payload.timestamp,
+									});
+								}
 							}
-						}
 
-						// Process field schema changes
-						if (tableData.changedFieldsById) {
-							console.log(`Processing field schema changes for table ${tableId}`);
-							const fieldSchemaInfos = extractFieldSchemaInfo(tableData.changedFieldsById);
+							// Process field schema changes
+							if (tableData.changedFieldsById) {
+								console.log(`Processing field schema changes for table ${tableId}`);
+								const fieldSchemaInfos = extractFieldSchemaInfo(tableData.changedFieldsById);
 
-							for (const fieldSchemaInfo of fieldSchemaInfos) {
-								formattedPayloads.push({
-									...fieldSchemaInfo,
-									tableId,
-									changedBy: payload.actionMetadata?.sourceMetadata?.user ? {
-										userId: payload.actionMetadata.sourceMetadata.user.id,
-										userName: payload.actionMetadata.sourceMetadata.user.name,
-										userEmail: payload.actionMetadata.sourceMetadata.user.email,
-									} : undefined,
-									timestamp: payload.timestamp,
-								});
+								for (const fieldSchemaInfo of fieldSchemaInfos) {
+									formattedPayloads.push({
+										...fieldSchemaInfo,
+										tableId,
+										changedBy: payload.actionMetadata?.sourceMetadata?.user ? {
+											userId: payload.actionMetadata.sourceMetadata.user.id,
+											userName: payload.actionMetadata.sourceMetadata.user.name,
+											userEmail: payload.actionMetadata.sourceMetadata.user.email,
+										} : undefined,
+										timestamp: payload.timestamp,
+									});
+								}
 							}
-						}
 
-						// Process table metadata changes
-						if (tableData.changedMetadata) {
-							console.log(`Processing table metadata changes for table ${tableId}`);
-							const tableMetadataInfos = extractTableMetadataInfo(tableData.changedMetadata);
+							// Process table metadata changes
+							if (tableData.changedMetadata) {
+								console.log(`Processing table metadata changes for table ${tableId}`);
+								const tableMetadataInfos = extractTableMetadataInfo(tableData.changedMetadata);
 
-							for (const tableMetadataInfo of tableMetadataInfos) {
-								formattedPayloads.push({
-									...tableMetadataInfo,
-									tableId,
-									changedBy: payload.actionMetadata?.sourceMetadata?.user ? {
-										userId: payload.actionMetadata.sourceMetadata.user.id,
-										userName: payload.actionMetadata.sourceMetadata.user.name,
-										userEmail: payload.actionMetadata.sourceMetadata.user.email,
-									} : undefined,
-									timestamp: payload.timestamp,
-								});
+								for (const tableMetadataInfo of tableMetadataInfos) {
+									formattedPayloads.push({
+										...tableMetadataInfo,
+										tableId,
+										changedBy: payload.actionMetadata?.sourceMetadata?.user ? {
+											userId: payload.actionMetadata.sourceMetadata.user.id,
+											userName: payload.actionMetadata.sourceMetadata.user.name,
+											userEmail: payload.actionMetadata.sourceMetadata.user.email,
+										} : undefined,
+										timestamp: payload.timestamp,
+									});
+								}
 							}
 						}
 					}
 				}
+
+				console.log('Formatted payloads:', formattedPayloads);
 			}
-
-			console.log('Formatted payloads:', formattedPayloads);
-
 			return {
 				workflowData: [
 					this.helpers.returnJsonArray(formattedPayloads),
 				],
 			};
+
 		} catch (error) {
 			console.error('Error processing webhook:', error);
 			// If there's an error, still return the original request body
